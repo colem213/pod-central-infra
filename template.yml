@@ -1,0 +1,320 @@
+Parameters:
+  WebAppStackName:
+    Type: String
+  SiteBucket:
+    Type: String
+  GitHubOauthToken:
+    Type: String
+    NoEcho: true
+Resources:
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "codebuild.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:s3:::${SiteBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "codepipeline.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:*
+                  - iam:PassRole
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "cloudformation.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - lambda:*
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - iam:*
+                  - dynamodb:*
+                  - cognito-idp:*
+                  - cognito-identity:*
+                  - s3:*
+                  - cloudfront:*
+                  - route53:*
+                  - apigateway:*
+              - Resource: !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 1
+  WebCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/nodejs:7.0.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: STACK_NAME
+            Value: !Ref WebAppStackName
+          - Name: SITE_BUCKET
+            Value: !Ref SiteBucket
+      Name: !Sub ${AWS::StackName}WebBuild
+      ServiceRole: !Ref CodeBuildServiceRole
+  WebCodePackageProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec_package.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/nodejs:7.0.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      Name: !Sub ${AWS::StackName}WebPackage
+      ServiceRole: !Ref CodeBuildServiceRole
+  RssLambdaCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/java:openjdk-8
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      Name: !Sub ${AWS::StackName}RssLambdaBuild
+      ServiceRole: !Ref CodeBuildServiceRole
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Web
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: colem213
+                Repo: pod-central-web
+                Branch: master
+                OAuthToken: !Ref GitHubOauthToken
+              OutputArtifacts:
+                - Name: Web
+              RunOrder: 1
+            - Name: RssLambda
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: colem213
+                Repo: pod-central-rss
+                Branch: master
+                OAuthToken: !Ref GitHubOauthToken
+              OutputArtifacts:
+                - Name: RssLambda
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: WebPackage
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref WebCodePackageProject
+              InputArtifacts:
+                - Name: Web
+              OutputArtifacts:
+                - Name: WebPackage
+              RunOrder: 1
+            - Name: RssLambdaBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref RssLambdaCodeBuildProject
+              InputArtifacts:
+                - Name: RssLambda
+              OutputArtifacts:
+                - Name: RssLambdaBuild
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: RssLambdaCreateChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: RssLambdaPipeline
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: RssLambda
+                Capabilities: CAPABILITY_IAM
+                TemplatePath: RssLambdaBuild::packaged.yml
+                TemplateConfiguration: RssLambdaBuild::prod-configuration.json
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              InputArtifacts:
+                - Name: RssLambdaBuild
+              RunOrder: 1
+            - Name: RssLambdaExecuteChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: RssLambdaPipeline
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: RssLambda
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              RunOrder: 2
+            - Name: WebCreateChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: WebPipeline
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Ref WebAppStackName
+                Capabilities: CAPABILITY_IAM
+                TemplatePath: WebPackage::packaged.yml
+                TemplateConfiguration: WebPackage::prod-configuration.json
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              InputArtifacts:
+                - Name: WebPackage
+              RunOrder: 3
+            - Name: WebExecuteChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: WebPipeline
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Ref WebAppStackName
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              RunOrder: 4
+            - Name: DeployWeb
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref WebCodeBuildProject
+              InputArtifacts:
+                - Name: Web
+              RunOrder: 5
+Outputs:
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}
